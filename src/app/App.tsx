@@ -37,6 +37,18 @@ const COUNTRY_LIST = Object.keys(COUNTRIES);
 const FILM_YEAR_MIN = Math.min(...FILMS.map(f => f.year));
 const FILM_YEAR_MAX = Math.max(...FILMS.map(f => f.year));
 const FILM_YEAR_SPAN = FILM_YEAR_MAX - FILM_YEAR_MIN + 1;
+const FILM_BY_ID = new Map(FILMS.map(film => [film.id, film] as const));
+const FILM_COUNT_BY_GENRE: Record<string, number> = {};
+const FILM_COUNT_BY_COUNTRY: Record<string, number> = {};
+const FILM_COUNT_BY_YEAR: Record<number, number> = {};
+
+for (const film of FILMS) {
+  FILM_COUNT_BY_GENRE[film.genre] = (FILM_COUNT_BY_GENRE[film.genre] ?? 0) + 1;
+  FILM_COUNT_BY_COUNTRY[film.country] = (FILM_COUNT_BY_COUNTRY[film.country] ?? 0) + 1;
+  FILM_COUNT_BY_YEAR[film.year] = (FILM_COUNT_BY_YEAR[film.year] ?? 0) + 1;
+}
+
+const COUNTRY_KEYS_WITH_FILMS = COUNTRY_LIST.filter(key => (FILM_COUNT_BY_COUNTRY[key] ?? 0) > 0);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function getPos(lat: number, lon: number, r: number): THREE.Vector3 {
@@ -120,10 +132,23 @@ function buildCountryCapGeo(lat: number, lon: number, radiusDeg: number): THREE.
 }
 
 // ── ThreeScene ────────────────────────────────────────────────────────────────
-function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRef, activeCountries = new Set<string>() }: {
+function ThreeScene({
+  selectedFilmId,
+  onSelect,
+  visibleFilmIds,
+  visibleFilmSet,
+  visibleGenreSet,
+  visibleCountrySet,
+  onHover,
+  resetRef,
+  activeCountries = new Set<string>(),
+}: {
   selectedFilmId: string | null;
   onSelect: (id: string | null) => void;
   visibleFilmIds: string[];
+  visibleFilmSet: Set<string>;
+  visibleGenreSet: Set<string>;
+  visibleCountrySet: Set<string>;
   onHover: (id: string | null) => void;
   resetRef: React.MutableRefObject<(() => void) | null>;
   activeCountries?: Set<string>;
@@ -131,16 +156,25 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
   const canvasRef  = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
-  const selectedRef       = useRef(selectedFilmId);
-  const onSelectRef       = useRef(onSelect);
-  const visibleRef        = useRef(visibleFilmIds);
-  const onHoverRef        = useRef(onHover);
+  const selectedRef        = useRef(selectedFilmId);
+  const onSelectRef        = useRef(onSelect);
+  const visibleIdsRef      = useRef(visibleFilmIds);
+  const visibleFilmSetRef  = useRef(visibleFilmSet);
+  const visibleGenreSetRef = useRef(visibleGenreSet);
+  const visibleCountrySetRef = useRef(visibleCountrySet);
+  const onHoverRef         = useRef(onHover);
   const activeCountriesRef = useRef(activeCountries);
+  const tubeByFilmIdRef    = useRef<Map<string, THREE.Mesh>>(new Map());
+  const visibleTubesRef    = useRef<THREE.Mesh[]>([]);
+  const syncVisibleTubesRef = useRef<(() => void) | null>(null);
 
-  useEffect(() => { selectedRef.current        = selectedFilmId; });
-  useEffect(() => { onSelectRef.current        = onSelect; });
-  useEffect(() => { visibleRef.current         = visibleFilmIds; });
-  useEffect(() => { onHoverRef.current         = onHover; });
+  useEffect(() => { selectedRef.current = selectedFilmId; });
+  useEffect(() => { onSelectRef.current = onSelect; });
+  useEffect(() => { visibleIdsRef.current = visibleFilmIds; syncVisibleTubesRef.current?.(); }, [visibleFilmIds]);
+  useEffect(() => { visibleFilmSetRef.current = visibleFilmSet; }, [visibleFilmSet]);
+  useEffect(() => { visibleGenreSetRef.current = visibleGenreSet; }, [visibleGenreSet]);
+  useEffect(() => { visibleCountrySetRef.current = visibleCountrySet; }, [visibleCountrySet]);
+  useEffect(() => { onHoverRef.current = onHover; });
   useEffect(() => { activeCountriesRef.current = activeCountries; }, [activeCountries]);
 
   useEffect(() => {
@@ -362,6 +396,14 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
       filmObjs.push({ tube, mat, film });
     });
 
+    tubeByFilmIdRef.current = new Map(filmObjs.map(obj => [obj.film.id, obj.tube] as const));
+    syncVisibleTubesRef.current = () => {
+      visibleTubesRef.current = visibleIdsRef.current
+        .map(id => tubeByFilmIdRef.current.get(id))
+        .filter((tube): tube is THREE.Mesh => !!tube);
+    };
+    syncVisibleTubesRef.current();
+
     // ── HTML label overlay ────────────────────────────────────────────────────
     // country labels
     const countryLabelEls: Record<string, HTMLSpanElement> = {};
@@ -421,10 +463,7 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       );
       raycaster.setFromCamera(cm, camera);
-      const clickableTubes = filmObjs
-        .filter(o => visibleRef.current.includes(o.film.id))
-        .map(o => o.tube);
-      const hits = raycaster.intersectObjects(clickableTubes);
+      const hits = raycaster.intersectObjects(visibleTubesRef.current);
       if (hits.length > 0) {
         const fid = tubeToId.get(hits[0].object.uuid);
         if (fid) onSelectRef.current(selectedRef.current === fid ? null : fid);
@@ -440,17 +479,14 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
       controls.update();
 
       const anySelected = selectedRef.current !== null;
-      const isFiltering = visibleRef.current.length < FILMS.length;
+      const isFiltering = visibleFilmSetRef.current.size < FILMS.length;
 
       controls.autoRotate = !anySelected && !userInteracted;
 
       // hover — only test tubes that are in the current visible/filtered set
       if (!anySelected) {
         raycaster.setFromCamera(mouse, camera);
-        const hoverableTubes = filmObjs
-          .filter(o => visibleRef.current.includes(o.film.id))
-          .map(o => o.tube);
-        const hits     = raycaster.intersectObjects(hoverableTubes);
+        const hits = raycaster.intersectObjects(visibleTubesRef.current);
         const newHovId = hits.length > 0 ? (tubeToId.get(hits[0].object.uuid) ?? null) : null;
         if (newHovId !== hoveredId) { hoveredId = newHovId; onHoverRef.current(newHovId); }
       } else if (hoveredId !== null) {
@@ -459,19 +495,16 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
 
       // selected film + genre context
       // selActive: selected AND within current filter set (so spotlight mode is meaningful)
-      const selActive  = anySelected && visibleRef.current.includes(selectedRef.current!);
-      const selFilm    = selActive ? FILMS.find(f => f.id === selectedRef.current) ?? null : null;
+      const selActive  = anySelected && visibleFilmSetRef.current.has(selectedRef.current!);
+      const selFilm    = selActive ? (FILM_BY_ID.get(selectedRef.current!) ?? null) : null;
       const selGenre   = selFilm?.genre ?? null;
       const selCountry = selFilm?.country ?? null;
-
-      // derive which genres have visible films
-      const visibleGenreSet = new Set(FILMS.filter(f => visibleRef.current.includes(f.id)).map(f => f.genre));
 
       // film arc opacities
       filmObjs.forEach(obj => {
         const isSelected = obj.film.id === selectedRef.current;
         const isHovered  = obj.film.id === hoveredId;
-        const isVisible  = visibleRef.current.includes(obj.film.id);
+        const isVisible  = visibleFilmSetRef.current.has(obj.film.id);
         let tOp: number;
         if (selActive)        tOp = isSelected ? 0.96 : 0.007;
         else if (isFiltering) tOp = isVisible ? (isHovered ? 0.84 : 0.24) : 0.007;
@@ -482,7 +515,7 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
       // country dot + halo opacities
       Object.entries(countryDotMats).forEach(([key, mat]) => {
         const isSelCountry = selCountry === key;
-        const hasVisible   = FILMS.some(f => f.country === key && visibleRef.current.includes(f.id));
+        const hasVisible   = visibleCountrySetRef.current.has(key);
         let tOp: number;
         if (selActive)        tOp = isSelCountry ? 1.0 : 0.09;
         else if (isFiltering) tOp = hasVisible ? 0.90 : 0.09;
@@ -529,7 +562,7 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
       // genre dot opacities
       Object.entries(genreDotMats).forEach(([genre, mat]) => {
         const isSelGenre = selGenre === genre;
-        const isActive   = !isFiltering || visibleGenreSet.has(genre);
+        const isActive   = !isFiltering || visibleGenreSetRef.current.has(genre);
         let tOp: number;
         if (selActive)        tOp = isSelGenre ? 1.0 : 0.09;
         else if (isFiltering) tOp = isActive ? 0.90 : 0.09;
@@ -561,7 +594,7 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
         el.style.transform = `translate(${px + 9}px, ${py - 13}px) scale(${labelScale.toFixed(3)})`;
 
         const isSelC  = selCountry === key;
-        const hasVis  = FILMS.some(f => f.country === key && visibleRef.current.includes(f.id));
+        const hasVis  = visibleCountrySetRef.current.has(key);
         if (selActive)        el.style.opacity = isSelC  ? '1' : '0.10';
         else if (isFiltering) el.style.opacity = hasVis  ? '0.72' : '0.10';
         else                  el.style.opacity = '0.60';
@@ -581,7 +614,7 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
         el.style.transform = `translate(${px + (dirX / len) * 14}px, ${py + (dirY / len) * 14 - 4}px) scale(${labelScale.toFixed(3)})`;
 
         const isSelG = selGenre === genre;
-        const isAct  = !isFiltering || visibleGenreSet.has(genre);
+        const isAct  = !isFiltering || visibleGenreSetRef.current.has(genre);
         if (selActive)        el.style.opacity = isSelG ? '1' : '0.08';
         else if (isFiltering) el.style.opacity = isAct  ? '0.70' : '0.08';
         else                  el.style.opacity = '0.55';
@@ -601,6 +634,9 @@ function ThreeScene({ selectedFilmId, onSelect, visibleFilmIds, onHover, resetRe
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
+      syncVisibleTubesRef.current = null;
+      tubeByFilmIdRef.current.clear();
+      visibleTubesRef.current = [];
       controls.dispose(); renderer.dispose(); scene.clear();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
       Object.values(countryLabelEls).forEach(el => el.remove());
@@ -630,34 +666,28 @@ function FilterPanel({
   searchQuery, setSearchQuery,
   activeGenres, toggleGenre,
   activeCountries, toggleCountry,
-  visibleCount, visibleFilmIds, onSelectFilm, clearFilters,
+  visibleCount, visibleCountryCounts, onSelectFilm, clearFilters,
 }: {
   searchQuery: string; setSearchQuery: (v: string) => void;
   activeGenres: Set<string>; toggleGenre: (id: string) => void;
   activeCountries: Set<string>; toggleCountry: (id: string) => void;
-  visibleCount: number; visibleFilmIds: string[]; onSelectFilm: (id: string) => void;
+  visibleCount: number; onSelectFilm: (id: string) => void;
+  visibleCountryCounts: Record<string, number>;
   clearFilters: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const q = searchQuery.trim().toLowerCase();
-  const searchResults = q ? FILMS.filter(f =>
-    f.title.toLowerCase().includes(q) ||
-    f.director.toLowerCase().includes(q) ||
-    COUNTRIES[f.country]?.label.toLowerCase().includes(q) ||
-    f.genre.toLowerCase().includes(q)
-  ) : [];
+  const searchResults = useMemo(() => {
+    if (!q) return [];
+    return FILMS.filter(f =>
+      f.title.toLowerCase().includes(q) ||
+      f.director.toLowerCase().includes(q) ||
+      COUNTRIES[f.country]?.label.toLowerCase().includes(q) ||
+      f.genre.toLowerCase().includes(q)
+    );
+  }, [q]);
   const showDropdown     = q.length > 0;
   const hasActiveFilters = activeGenres.size > 0 || activeCountries.size > 0 || searchQuery.length > 0;
-
-  // pre-compute per-country count in one pass to avoid O(n²) in render
-  const countryVisibleCounts = useMemo(() => {
-    const map: Record<string, number> = {};
-    visibleFilmIds.forEach(id => {
-      const film = FILMS.find(f => f.id === id);
-      if (film) map[film.country] = (map[film.country] ?? 0) + 1;
-    });
-    return map;
-  }, [visibleFilmIds]);
 
   return (
     <div style={{
@@ -736,7 +766,7 @@ function FilterPanel({
             {GENRE_LIST.map(genre => {
               const gd     = GENRE_DATA[genre];
               const active = activeGenres.has(genre);
-              const count  = FILMS.filter(f => f.genre === genre).length;
+              const count  = FILM_COUNT_BY_GENRE[genre] ?? 0;
               return (
                 <button key={genre} onClick={() => toggleGenre(genre)}
                   style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 2, textAlign: 'left', background: active ? `${gd.css}14` : 'transparent', borderLeft: active ? `2px solid ${gd.css}` : '2px solid transparent', cursor: 'pointer', transition: 'all 0.15s' }}
@@ -754,11 +784,10 @@ function FilterPanel({
         <div style={{ marginBottom: 20 }}>
           <SectionLabel>国家</SectionLabel>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {COUNTRY_LIST.map(key => {
+            {COUNTRY_KEYS_WITH_FILMS.map(key => {
               const cd         = COUNTRIES[key];
               const active     = activeCountries.has(key);
-              const filmCount  = countryVisibleCounts[key] ?? 0;
-              if (!FILMS.some(f => f.country === key)) return null;
+              const filmCount  = visibleCountryCounts[key] ?? 0;
               return (
                 <button key={key} onClick={() => toggleCountry(key)}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 7px 3px 8px', borderRadius: 10, background: active ? 'rgba(38,32,26,0.12)' : 'rgba(38,32,26,0.03)', border: '0.5px solid ' + (active ? 'rgba(38,32,26,0.22)' : 'rgba(38,32,26,0.05)'), cursor: 'pointer', fontSize: 9.5, letterSpacing: '0.01em', color: active ? '#1A1612' : '#B0A8A0', transition: 'all 0.15s' }}
@@ -855,10 +884,6 @@ function TimelineSlider({ yearRange, setYearRange }: {
   const isDefault = yearRange[0] === MIN_YEAR && yearRange[1] === MAX_YEAR;
 
   // film distribution by year
-  const filmsByYear = FILMS.reduce((acc, f) => {
-    acc[f.year] = (acc[f.year] || 0) + 1; return acc;
-  }, {} as Record<number, number>);
-
   // tick years
   const ticks: number[] = [];
   for (let y = 1990; y <= MAX_YEAR; y += 5) ticks.push(y);
@@ -899,7 +924,7 @@ function TimelineSlider({ yearRange, setYearRange }: {
 
       {/* Film distribution dots */}
       <div style={{ position: 'relative', height: 9, marginBottom: 3 }}>
-        {Object.entries(filmsByYear).map(([yrStr, count]) => {
+        {Object.entries(FILM_COUNT_BY_YEAR).map(([yrStr, count]) => {
           const y = parseInt(yrStr);
           const pct = yToPct(y);
           const inRange = y >= yearRange[0] && y <= yearRange[1];
@@ -1075,34 +1100,45 @@ export default function App() {
     setActiveCountries(new Set());
   };
 
-  const visibleFilmIds = useMemo(() => {
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+
+  const visibleFilms = useMemo(() => {
     return FILMS.filter(f => {
       if (f.year < yearRange[0] || f.year > yearRange[1]) return false;
       if (activeGenres.size > 0 && !activeGenres.has(f.genre)) return false;
       if (activeCountries.size > 0 && !activeCountries.has(f.country)) return false;
-      const q = searchQuery.trim().toLowerCase();
-      if (q) {
-        const hit = f.title.toLowerCase().includes(q)
-          || f.director.toLowerCase().includes(q)
-          || COUNTRIES[f.country]?.label.toLowerCase().includes(q)
-          || f.genre.toLowerCase().includes(q);
+      if (normalizedQuery) {
+        const hit = f.title.toLowerCase().includes(normalizedQuery)
+          || f.director.toLowerCase().includes(normalizedQuery)
+          || COUNTRIES[f.country]?.label.toLowerCase().includes(normalizedQuery)
+          || f.genre.toLowerCase().includes(normalizedQuery);
         if (!hit) return false;
       }
       return true;
-    }).map(f => f.id);
-  }, [yearRange, searchQuery, activeGenres, activeCountries]);
+    });
+  }, [yearRange, normalizedQuery, activeGenres, activeCountries]);
+
+  const visibleFilmIds = useMemo(() => visibleFilms.map(f => f.id), [visibleFilms]);
+  const visibleFilmSet = useMemo(() => new Set(visibleFilmIds), [visibleFilmIds]);
+  const visibleGenreSet = useMemo(() => new Set(visibleFilms.map(f => f.genre)), [visibleFilms]);
+  const visibleCountryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const film of visibleFilms) counts[film.country] = (counts[film.country] ?? 0) + 1;
+    return counts;
+  }, [visibleFilms]);
+  const visibleCountrySet = useMemo(() => new Set(Object.keys(visibleCountryCounts)), [visibleCountryCounts]);
+  const visibleFilmIndexById = useMemo(() => new Map(visibleFilms.map((film, index) => [film.id, index] as const)), [visibleFilms]);
 
   // Clear selection when the selected film is filtered out, so all visible arcs show
   useEffect(() => {
-    if (selectedFilmId !== null && !visibleFilmIds.includes(selectedFilmId)) {
+    if (selectedFilmId !== null && !visibleFilmSet.has(selectedFilmId)) {
       setSelectedFilmId(null);
     }
-  }, [visibleFilmIds]);
+  }, [selectedFilmId, visibleFilmSet]);
 
-  const selectedFilm   = FILMS.find(f => f.id === selectedFilmId) ?? null;
-  const visibleFilms   = FILMS.filter(f => visibleFilmIds.includes(f.id));
-  const selectedIndex  = visibleFilms.findIndex(f => f.id === selectedFilmId);
-  const hoveredFilm    = (!selectedFilmId && hoveredFilmId) ? (FILMS.find(f => f.id === hoveredFilmId) ?? null) : null;
+  const selectedFilm   = selectedFilmId ? (FILM_BY_ID.get(selectedFilmId) ?? null) : null;
+  const selectedIndex  = selectedFilmId ? (visibleFilmIndexById.get(selectedFilmId) ?? -1) : -1;
+  const hoveredFilm    = (!selectedFilmId && hoveredFilmId) ? (FILM_BY_ID.get(hoveredFilmId) ?? null) : null;
 
   const selectNext = () => {
     if (!visibleFilms.length) return;
@@ -1140,6 +1176,9 @@ export default function App() {
         selectedFilmId={selectedFilmId}
         onSelect={setSelectedFilmId}
         visibleFilmIds={visibleFilmIds}
+        visibleFilmSet={visibleFilmSet}
+        visibleGenreSet={visibleGenreSet}
+        visibleCountrySet={visibleCountrySet}
         onHover={setHoveredFilmId}
         resetRef={sceneResetRef}
         activeCountries={activeCountries}
@@ -1236,7 +1275,7 @@ export default function App() {
         activeGenres={activeGenres} toggleGenre={toggleGenre}
         activeCountries={activeCountries} toggleCountry={toggleCountry}
         visibleCount={visibleFilmIds.length}
-        visibleFilmIds={visibleFilmIds}
+        visibleCountryCounts={visibleCountryCounts}
         onSelectFilm={setSelectedFilmId}
         clearFilters={clearFilters}
       />
